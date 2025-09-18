@@ -1,0 +1,755 @@
+# ================================================================
+# COASTAL COMMUNICATIONS 5-OUTPUT FOXTEL IR BLASTER
+# ================================================================
+# 
+# PRODUCTION VERSION - MULTI-FOXTEL BOX CONTROL
+# 
+# Features:
+# ✅ 5 Independent IR outputs (0-4) for Foxtel boxes
+# ✅ Smart channel system with box prefix (2-501 → Box 2, Channel 501)
+# ✅ Backward compatible (no prefix or 0- uses original output)
+# ✅ Native Pronto Hex support - no conversion needed
+# ✅ Complete Foxtel command set (Power, Mute, Ch+/-, 0-9)
+# ✅ Clean entity naming (ir_abc123_xxx)
+# ✅ Hidden WiFi network support
+# ✅ Zero configuration deployment
+#
+# Hardware Requirements:
+# - Wemos D1 Mini
+# - 5x 5mm IR LED (940nm)
+# - 5x 220Ω resistor
+# - Extension wires as needed
+#
+# GPIO Mapping:
+# - Box 0 (default): GPIO14 (D5)
+# - Box 1: GPIO12 (D6)
+# - Box 2: GPIO13 (D7) 
+# - Box 3: GPIO15 (D8)
+# - Box 4: GPIO16 (D0)
+#
+# Network: "FOXTEL" (hidden) / "rdL1R7iDpXDx4O"
+#
+# ================================================================
+
+esphome:
+  name: "ir"
+  friendly_name: "5-Output Foxtel IR Blaster"
+  comment: "Coastal Communications 5-Output Foxtel IR Blaster"
+  name_add_mac_suffix: true
+  
+  project:
+    name: "coastalcomms.5-output-foxtel"
+    version: "1.0.0"
+    
+  # Log IP address on boot
+  on_boot:
+    priority: -100  # Run after WiFi connects
+    then:
+      - delay: 5s  # Give WiFi time to fully connect
+      - lambda: |-
+          ESP_LOGI("BOOT", "=================================");
+          ESP_LOGI("BOOT", "Device: %s", App.get_name().c_str());
+          ESP_LOGI("BOOT", "IP Address: %s", WiFi.localIP().toString().c_str());
+          ESP_LOGI("BOOT", "MAC Address: %s", WiFi.macAddress().c_str());
+          ESP_LOGI("BOOT", "=================================");
+
+esp8266:
+  board: d1_mini
+  restore_from_flash: true
+
+logger:
+  level: INFO
+
+# ================================================================
+# HOME ASSISTANT API & SERVICES
+# ================================================================
+
+api:
+  encryption:
+    key: "uuPgF8JOAV/ZhFbDV4iS4Kwr1MV5H97p6Nk+HnpE0+g="
+  
+  services:
+    # ============================================================
+    # SMART MULTI-BOX CHANNEL SERVICE - FOXTEL VERSION
+    # ============================================================
+    # Usage Examples:
+    # channel: "501"     → Box 0 (default), Channel 501
+    # channel: "0-501"   → Box 0 (explicit), Channel 501  
+    # channel: "2-501"   → Box 2, Channel 501
+    # channel: "4-125"   → Box 4, Channel 125
+    # ============================================================
+    - service: tv_channel
+      variables:
+        channel: string
+      then:
+        - script.execute:
+            id: smart_foxtel_channel
+            channel_str: !lambda 'return channel;'
+
+    # Individual box power controls
+    - service: tv_power
+      variables:
+        box: int
+      then:
+        - script.execute:
+            id: foxtel_box_power
+            box_id: !lambda 'return box;'
+
+    # Individual box mute controls
+    - service: tv_mute
+      variables:
+        box: int
+      then:
+        - script.execute:
+            id: foxtel_box_mute
+            box_id: !lambda 'return box;'
+
+    # Channel up/down controls
+    - service: tv_channel_up
+      variables:
+        box: int
+      then:
+        - script.execute:
+            id: foxtel_box_channel_up
+            box_id: !lambda 'return box;'
+
+    - service: tv_channel_down
+      variables:
+        box: int
+      then:
+        - script.execute:
+            id: foxtel_box_channel_down
+            box_id: !lambda 'return box;'
+
+# ================================================================
+# NETWORK CONFIGURATION
+# ================================================================
+
+ota:
+  - platform: esphome
+    password: "b3184cf21c566d228ecac46988ef4f74"
+
+wifi:
+  networks:
+    - ssid: "TV"
+      password: "rdL1R7iDpXDx4O"
+      hidden: true
+  
+  ap:
+    ssid: "IR-Blaster Setup"
+    password: "12345678"
+    ap_timeout: 1min
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 3
+  local: true
+  include_internal: true
+
+# ================================================================
+# HARDWARE CONFIGURATION - 5 IR TRANSMITTERS
+# ================================================================
+
+status_led:
+  pin:
+    number: GPIO2
+    inverted: true
+
+# Multiple IR Transmitters for Foxtel boxes
+remote_transmitter:
+  # Box 0 (Default) - GPIO14 (D5)
+  - pin: GPIO14
+    carrier_duty_percent: 50%
+    id: ir_transmitter_0
+
+  # Box 1 - GPIO12 (D6)  
+  - pin: GPIO12
+    carrier_duty_percent: 50%
+    id: ir_transmitter_1
+
+  # Box 2 - GPIO13 (D7)
+  - pin: GPIO13
+    carrier_duty_percent: 50%
+    id: ir_transmitter_2
+
+  # Box 3 - GPIO15 (D8)
+  - pin: GPIO15
+    carrier_duty_percent: 50%
+    id: ir_transmitter_3
+
+  # Box 4 - GPIO16 (D0)
+  - pin: GPIO16
+    carrier_duty_percent: 50%
+    id: ir_transmitter_4
+
+# ================================================================
+# FOXTEL IR COMMAND SCRIPTS
+# ================================================================
+
+script:
+  # Smart channel parser and sender for Foxtel
+  - id: smart_foxtel_channel
+    parameters:
+      channel_str: string
+    then:
+      - lambda: |-
+          std::string input = channel_str;
+          int box_id = 0;  // Default to Box 0
+          int channel = 0;
+          
+          ESP_LOGI("FOXTEL", "Processing channel input: %s", input.c_str());
+          
+          // Check for box prefix (format: "2-501" or "0-501")
+          size_t dash_pos = input.find("-");
+          if (dash_pos != std::string::npos) {
+            // Found dash, extract box number and channel
+            std::string box_str = input.substr(0, dash_pos);
+            std::string channel_str = input.substr(dash_pos + 1);
+            
+            box_id = std::stoi(box_str);
+            channel = std::stoi(channel_str);
+            
+            ESP_LOGI("FOXTEL", "Parsed: Box %d, Channel %d", box_id, channel);
+          } else {
+            // No dash, treat as channel number for Box 0
+            channel = std::stoi(input);
+            ESP_LOGI("FOXTEL", "No prefix - Box 0, Channel %d", channel);
+          }
+          
+          // Validate box number
+          if (box_id < 0 || box_id > 4) {
+            ESP_LOGW("FOXTEL", "Invalid box number: %d", box_id);
+            return;
+          }
+          
+          // Validate channel number
+          if (channel < 0 || channel > 9999) {
+            ESP_LOGW("FOXTEL", "Invalid channel: %d", channel);
+            return;
+          }
+          
+          // Store for digit sequence
+          id(target_box) = box_id;
+          id(channel_digits) = std::to_string(channel);
+          id(digit_index) = 0;
+          
+      - script.execute: send_next_foxtel_digit
+
+  - id: send_next_foxtel_digit
+    mode: restart
+    then:
+      - lambda: |-
+          if (id(digit_index) < id(channel_digits).length()) {
+            int digit = id(channel_digits)[id(digit_index)] - '0';
+            int box = id(target_box);
+            ESP_LOGI("FOXTEL", "Box %d - Channel digit: %d", box, digit);
+            
+            // Send digit to specific Foxtel box
+            id(send_foxtel_digit).execute(box, digit);
+            id(digit_index)++;
+            
+            if (id(digit_index) < id(channel_digits).length()) {
+              return;
+            } else {
+              ESP_LOGI("FOXTEL", "Box %d - Channel sequence complete", box);
+            }
+          }
+      - if:
+          condition:
+            lambda: 'return id(digit_index) < id(channel_digits).length();'
+          then:
+            - delay: 750ms  # Longer delay for Foxtel boxes (750ms vs 300ms)
+            - script.execute: send_next_foxtel_digit
+
+  # Send Foxtel digit to specific box
+  - id: send_foxtel_digit
+    parameters:
+      box_id: int
+      digit: int
+    then:
+      - lambda: |-
+          ESP_LOGI("FOXTEL", "Sending digit %d to box %d", digit, box_id);
+          
+          // Foxtel digit codes (Pronto Hex format)
+          std::string foxtel_digits[] = {
+            "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 000A 0006 000A 0006 000A 0006 0CAB", // 0
+            "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 000A 0006 000A 0006 0010 0006 0CA5", // 1
+            "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0C9F", // 2
+            "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 000A 0006 000A 0006 001C 0006 0C99", // 3
+            "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 000A 0006 0010 0006 000A 0006 0CA5", // 4
+            "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 000A 0006 0010 0006 0010 0006 0C9F", // 5
+            "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 000A 0006 0010 0006 0016 0006 0C99", // 6
+            "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 000A 0006 0010 0006 001C 0006 0C93", // 7
+            "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 000A 0006 0016 0006 000A 0006 0C9F", // 8
+            "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 000A 0006 0016 0006 0010 0006 0C99"  // 9
+          };
+          
+          if (digit < 0 || digit > 9) {
+            ESP_LOGW("FOXTEL", "Invalid digit: %d", digit);
+            return;
+          }
+          
+          // Store current digit code and box for action calls
+          id(current_pronto_code) = foxtel_digits[digit];
+          id(current_box) = box_id;
+          
+      # Send Pronto code based on box
+      - if:
+          condition:
+            lambda: 'return id(current_box) == 0;'
+          then:
+            - remote_transmitter.transmit_pronto:
+                transmitter_id: ir_transmitter_0
+                data: !lambda 'return id(current_pronto_code);'
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(current_box) == 1;'
+                then:
+                  - remote_transmitter.transmit_pronto:
+                      transmitter_id: ir_transmitter_1
+                      data: !lambda 'return id(current_pronto_code);'
+                else:
+                  - if:
+                      condition:
+                        lambda: 'return id(current_box) == 2;'
+                      then:
+                        - remote_transmitter.transmit_pronto:
+                            transmitter_id: ir_transmitter_2
+                            data: !lambda 'return id(current_pronto_code);'
+                      else:
+                        - if:
+                            condition:
+                              lambda: 'return id(current_box) == 3;'
+                            then:
+                              - remote_transmitter.transmit_pronto:
+                                  transmitter_id: ir_transmitter_3
+                                  data: !lambda 'return id(current_pronto_code);'
+                            else:
+                              - if:
+                                  condition:
+                                    lambda: 'return id(current_box) == 4;'
+                                  then:
+                                    - remote_transmitter.transmit_pronto:
+                                        transmitter_id: ir_transmitter_4
+                                        data: !lambda 'return id(current_pronto_code);'
+
+  # Power command for specific Foxtel box
+  - id: foxtel_box_power
+    parameters:
+      box_id: int
+    then:
+      - lambda: |-
+          ESP_LOGI("FOXTEL", "Power command for Box %d", box_id);
+          id(current_box) = box_id;
+          // Foxtel power code
+          id(current_pronto_code) = "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 000A 0006 001C 0006 000A 0006 0C99";
+          
+      - if:
+          condition:
+            lambda: 'return id(current_box) == 0;'
+          then:
+            - remote_transmitter.transmit_pronto:
+                transmitter_id: ir_transmitter_0
+                data: !lambda 'return id(current_pronto_code);'
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(current_box) == 1;'
+                then:
+                  - remote_transmitter.transmit_pronto:
+                      transmitter_id: ir_transmitter_1
+                      data: !lambda 'return id(current_pronto_code);'
+                else:
+                  - if:
+                      condition:
+                        lambda: 'return id(current_box) == 2;'
+                      then:
+                        - remote_transmitter.transmit_pronto:
+                            transmitter_id: ir_transmitter_2
+                            data: !lambda 'return id(current_pronto_code);'
+                      else:
+                        - if:
+                            condition:
+                              lambda: 'return id(current_box) == 3;'
+                            then:
+                              - remote_transmitter.transmit_pronto:
+                                  transmitter_id: ir_transmitter_3
+                                  data: !lambda 'return id(current_pronto_code);'
+                            else:
+                              - if:
+                                  condition:
+                                    lambda: 'return id(current_box) == 4;'
+                                  then:
+                                    - remote_transmitter.transmit_pronto:
+                                        transmitter_id: ir_transmitter_4
+                                        data: !lambda 'return id(current_pronto_code);'
+
+  # Mute command for specific Foxtel box
+  - id: foxtel_box_mute
+    parameters:
+      box_id: int
+    then:
+      - lambda: |-
+          ESP_LOGI("FOXTEL", "Mute command for Box %d", box_id);
+          id(current_box) = box_id;
+          // Foxtel mute code
+          id(current_pronto_code) = "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 000A 0006 001C 0006 0010 0006 0C93";
+          
+      - if:
+          condition:
+            lambda: 'return id(current_box) == 0;'
+          then:
+            - remote_transmitter.transmit_pronto:
+                transmitter_id: ir_transmitter_0
+                data: !lambda 'return id(current_pronto_code);'
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(current_box) == 1;'
+                then:
+                  - remote_transmitter.transmit_pronto:
+                      transmitter_id: ir_transmitter_1
+                      data: !lambda 'return id(current_pronto_code);'
+                else:
+                  - if:
+                      condition:
+                        lambda: 'return id(current_box) == 2;'
+                      then:
+                        - remote_transmitter.transmit_pronto:
+                            transmitter_id: ir_transmitter_2
+                            data: !lambda 'return id(current_pronto_code);'
+                      else:
+                        - if:
+                            condition:
+                              lambda: 'return id(current_box) == 3;'
+                            then:
+                              - remote_transmitter.transmit_pronto:
+                                  transmitter_id: ir_transmitter_3
+                                  data: !lambda 'return id(current_pronto_code);'
+                            else:
+                              - if:
+                                  condition:
+                                    lambda: 'return id(current_box) == 4;'
+                                  then:
+                                    - remote_transmitter.transmit_pronto:
+                                        transmitter_id: ir_transmitter_4
+                                        data: !lambda 'return id(current_pronto_code);'
+
+  # Channel up command for specific Foxtel box
+  - id: foxtel_box_channel_up
+    parameters:
+      box_id: int
+    then:
+      - lambda: |-
+          ESP_LOGI("FOXTEL", "Channel up command for Box %d", box_id);
+          id(current_box) = box_id;
+          // Foxtel channel up code
+          id(current_pronto_code) = "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 0016 0006 000A 0006 000A 0006 0C9F";
+          
+      - if:
+          condition:
+            lambda: 'return id(current_box) == 0;'
+          then:
+            - remote_transmitter.transmit_pronto:
+                transmitter_id: ir_transmitter_0
+                data: !lambda 'return id(current_pronto_code);'
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(current_box) == 1;'
+                then:
+                  - remote_transmitter.transmit_pronto:
+                      transmitter_id: ir_transmitter_1
+                      data: !lambda 'return id(current_pronto_code);'
+                else:
+                  - if:
+                      condition:
+                        lambda: 'return id(current_box) == 2;'
+                      then:
+                        - remote_transmitter.transmit_pronto:
+                            transmitter_id: ir_transmitter_2
+                            data: !lambda 'return id(current_pronto_code);'
+                      else:
+                        - if:
+                            condition:
+                              lambda: 'return id(current_box) == 3;'
+                            then:
+                              - remote_transmitter.transmit_pronto:
+                                  transmitter_id: ir_transmitter_3
+                                  data: !lambda 'return id(current_pronto_code);'
+                            else:
+                              - if:
+                                  condition:
+                                    lambda: 'return id(current_box) == 4;'
+                                  then:
+                                    - remote_transmitter.transmit_pronto:
+                                        transmitter_id: ir_transmitter_4
+                                        data: !lambda 'return id(current_pronto_code);'
+
+  # Channel down command for specific Foxtel box  
+  - id: foxtel_box_channel_down
+    parameters:
+      box_id: int
+    then:
+      - lambda: |-
+          ESP_LOGI("FOXTEL", "Channel down command for Box %d", box_id);
+          id(current_box) = box_id;
+          // Foxtel channel down code
+          id(current_pronto_code) = "0000 0073 0000 0012 000F 000A 0006 000A 0006 0016 0006 000A 0006 0010 0006 0016 0006 0016 0006 000A 0006 000A 0006 000A 0006 0016 0006 0010 0006 0016 0006 000A 0006 0016 0006 000A 0006 0010 0006 0C99";
+          
+      - if:
+          condition:
+            lambda: 'return id(current_box) == 0;'
+          then:
+            - remote_transmitter.transmit_pronto:
+                transmitter_id: ir_transmitter_0
+                data: !lambda 'return id(current_pronto_code);'
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(current_box) == 1;'
+                then:
+                  - remote_transmitter.transmit_pronto:
+                      transmitter_id: ir_transmitter_1
+                      data: !lambda 'return id(current_pronto_code);'
+                else:
+                  - if:
+                      condition:
+                        lambda: 'return id(current_box) == 2;'
+                      then:
+                        - remote_transmitter.transmit_pronto:
+                            transmitter_id: ir_transmitter_2
+                            data: !lambda 'return id(current_pronto_code);'
+                      else:
+                        - if:
+                            condition:
+                              lambda: 'return id(current_box) == 3;'
+                            then:
+                              - remote_transmitter.transmit_pronto:
+                                  transmitter_id: ir_transmitter_3
+                                  data: !lambda 'return id(current_pronto_code);'
+                            else:
+                              - if:
+                                  condition:
+                                    lambda: 'return id(current_box) == 4;'
+                                  then:
+                                    - remote_transmitter.transmit_pronto:
+                                        transmitter_id: ir_transmitter_4
+                                        data: !lambda 'return id(current_pronto_code);'
+
+# ================================================================
+# GLOBAL VARIABLES
+# ================================================================
+
+globals:
+  - id: channel_digits
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+    
+  - id: digit_index
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: target_box
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  # Variables for passing Pronto codes to actions
+  - id: current_pronto_code
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+
+  - id: current_box
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+# ================================================================
+# MONITORING & DIAGNOSTICS
+# ================================================================
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 60s
+
+text_sensor:
+  - platform: template
+    name: "Foxtel Setup"
+    lambda: |-
+      std::string result = "5-Output Foxtel IR | Host: ";
+      result += WiFi.localIP().toString().c_str();
+      result += " | Key: uuPgF8JOAV/ZhFbDV4iS4Kwr1MV5H97p6Nk+HnpE0+g=";
+      return result;
+    update_interval: 60s
+    icon: "mdi:set-top-box"
+    
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+    mac_address:
+      name: "MAC Address"
+
+# ================================================================
+# CONTROL BUTTONS
+# ================================================================
+
+button:
+  # Box 0 controls
+  - platform: template
+    name: "Box 0 - Power"
+    on_press:
+      - script.execute:
+          id: foxtel_box_power
+          box_id: 0
+      
+  - platform: template
+    name: "Box 0 - Mute"
+    on_press:
+      - script.execute:
+          id: foxtel_box_mute
+          box_id: 0
+
+  - platform: template
+    name: "Box 0 - Channel Up"
+    on_press:
+      - script.execute:
+          id: foxtel_box_channel_up
+          box_id: 0
+
+  - platform: template
+    name: "Box 0 - Channel Down"
+    on_press:
+      - script.execute:
+          id: foxtel_box_channel_down
+          box_id: 0
+
+  # Box 1 controls
+  - platform: template
+    name: "Box 1 - Power"
+    on_press:
+      - script.execute:
+          id: foxtel_box_power
+          box_id: 1
+
+  - platform: template
+    name: "Box 1 - Mute"
+    on_press:
+      - script.execute:
+          id: foxtel_box_mute
+          box_id: 1
+
+  - platform: template
+    name: "Box 1 - Channel Up"
+    on_press:
+      - script.execute:
+          id: foxtel_box_channel_up
+          box_id: 1
+
+  - platform: template
+    name: "Box 1 - Channel Down"
+    on_press:
+      - script.execute:
+          id: foxtel_box_channel_down
+          box_id: 1
+
+  # Box 2 controls
+  - platform: template
+    name: "Box 2 - Power"
+    on_press:
+      - script.execute:
+          id: foxtel_box_power
+          box_id: 2
+
+  - platform: template
+    name: "Box 2 - Mute"
+    on_press:
+      - script.execute:
+          id: foxtel_box_mute
+          box_id: 2
+
+  - platform: template
+    name: "Box 2 - Channel Up"
+    on_press:
+      - script.execute:
+          id: foxtel_box_channel_up
+          box_id: 2
+
+  - platform: template
+    name: "Box 2 - Channel Down"
+    on_press:
+      - script.execute:
+          id: foxtel_box_channel_down
+          box_id: 2
+
+  # Box 3 controls
+  - platform: template
+    name: "Box 3 - Power"
+    on_press:
+      - script.execute:
+          id: foxtel_box_power
+          box_id: 3
+
+  - platform: template
+    name: "Box 3 - Mute"
+    on_press:
+      - script.execute:
+          id: foxtel_box_mute
+          box_id: 3
+
+  - platform: template
+    name: "Box 3 - Channel Up"
+    on_press:
+      - script.execute:
+          id: foxtel_box_channel_up
+          box_id: 3
+
+  - platform: template
+    name: "Box 3 - Channel Down"
+    on_press:
+      - script.execute:
+          id: foxtel_box_channel_down
+          box_id: 3
+
+  # Box 4 controls
+  - platform: template
+    name: "Box 4 - Power"
+    on_press:
+      - script.execute:
+          id: foxtel_box_power
+          box_id: 4
+
+  - platform: template
+    name: "Box 4 - Mute"
+    on_press:
+      - script.execute:
+          id: foxtel_box_mute
+          box_id: 4
+
+  - platform: template
+    name: "Box 4 - Channel Up"
+    on_press:
+      - script.execute:
+          id: foxtel_box_channel_up
+          box_id: 4
+
+  - platform: template
+    name: "Box 4 - Channel Down"
+    on_press:
+      - script.execute:
+          id: foxtel_box_channel_down
+          box_id: 4
+
+  - platform: restart
+    name: "Restart Device"
