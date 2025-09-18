@@ -58,6 +58,7 @@ class IRPortRequest(BaseModel):
 class IRPortResponse(BaseModel):
     id: int
     port_number: int
+    port_id: Optional[str]
     gpio_pin: Optional[str]
     connected_device_name: Optional[str]
     device_model_id: Optional[int]
@@ -236,7 +237,7 @@ async def manage_device(
         api_key=device_request.api_key,
         venue_name=device_request.venue_name,
         location=device_request.location,
-        total_ir_ports=5 if discovered.device_type == "foxtel" else 1,
+        total_ir_ports=5,  # All ESPHome devices have 5 IR ports with new firmware
         firmware_version=discovered.firmware_version,
         device_type=discovered.device_type or "universal",
         is_online=True,
@@ -261,6 +262,7 @@ async def manage_device(
             ir_port = IRPort(
                 device_id=managed_device.id,
                 port_number=port_req.port_number,
+                port_id=f"{managed_device.mac_address}-{port_req.port_number}",
                 gpio_pin=gpio_map.get(port_req.port_number),
                 connected_device_name=port_req.connected_device_name,
                 device_model_id=port_req.device_model_id,
@@ -284,7 +286,8 @@ async def manage_device(
         for i in range(port_count):
             ir_port = IRPort(
                 device_id=managed_device.id,
-                port_number=i,
+                port_number=i + 1,  # Port numbers are 1-based
+                port_id=f"{managed_device.mac_address}-{i + 1}",
                 gpio_pin=gpio_map.get(i),
                 is_active=True,
                 foxtel_box_number=i if discovered.device_type == "foxtel" else None
@@ -337,6 +340,7 @@ async def update_managed_device(
             ir_port = IRPort(
                 device_id=device_id,
                 port_number=port_req.port_number,
+                port_id=f"{device.mac_address}-{port_req.port_number}",
                 gpio_pin=gpio_map.get(port_req.port_number),
                 connected_device_name=port_req.connected_device_name,
                 device_model_id=port_req.device_model_id,
@@ -400,3 +404,22 @@ async def sync_device_status(device_id: int, db: Session = Depends(get_db)):
         "is_online": device.is_online,
         "current_ip": device.current_ip_address
     }
+
+
+@router.delete("/ir-port/{port_id}")
+async def delete_ir_port(port_id: int, db: Session = Depends(get_db)):
+    """Delete an IR port if it's inactive and unconfigured"""
+    port = db.query(IRPort).filter(IRPort.id == port_id).first()
+    if not port:
+        raise HTTPException(status_code=404, detail="Port not found")
+
+    # Only allow deletion if port is inactive and has no connected device
+    if port.is_active or port.connected_device_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete active port or port with connected device"
+        )
+
+    db.delete(port)
+    db.commit()
+    return {"message": f"Port {port.port_id} deleted successfully"}

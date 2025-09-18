@@ -8,6 +8,7 @@ from .core.config import settings
 from .db.database import create_tables, init_database
 from .api.devices import router as devices_router
 from .api.device_management import router as management_router
+from .api.admin import router as admin_router
 from .services.discovery import discovery_service
 
 # Configure logging
@@ -89,6 +90,12 @@ app.include_router(
     management_router,
     prefix=f"{settings.API_V1_STR}/management",
     tags=["device-management"]
+)
+
+app.include_router(
+    admin_router,
+    prefix=f"{settings.API_V1_STR}/admin",
+    tags=["admin"]
 )
 
 

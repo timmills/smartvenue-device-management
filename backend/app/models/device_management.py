@@ -103,6 +103,7 @@ class IRPort(Base):
 
     # Port identification
     port_number = Column(Integer, nullable=False)  # 0-4 for 5-port devices
+    port_id = Column(String, nullable=True, index=True)  # "dc4516-1", "dc4516-2", etc. - unique identifier using last 6 digits of MAC + port number
     gpio_pin = Column(String, nullable=True)  # "GPIO14", "GPIO12", etc.
 
     # Connected device information
